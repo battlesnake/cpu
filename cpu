@@ -10,6 +10,28 @@ cd /sys/devices/system/cpu/
 
 declare -ri total_cpus="$(ls -1 | grep -cxP "cpu\d+")"
 
+# Errors
+
+function error_invalid_cmd {
+	local -r cmd="${1:-}"
+	echo >&2 "Invalid command: $cmd"
+	echo >&2 ""
+	echo >&2 "For help: $0 help"
+	exit 1
+}
+
+function error_too_many_args {
+	echo >&2 "Too many arguments: $*"
+	echo >&2 ""
+	echo >&2 "For help: $0 help"
+	exit 1
+}
+
+function error_invalid_parameter {
+	echo >&2 "Invalid parameter: $*"
+	exit 1
+}
+
 # SI prefixes
 
 declare -rA si_prefixes=( [k]=3 [M]=6 [G]=9 [T]=12 )
@@ -18,8 +40,7 @@ function get_si_prefix_shift {
 	local -r prefix="$1"
 	shift
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	if [ -z "$prefix" ]; then
 		echo 0
@@ -37,8 +58,7 @@ function substitute_si_prefix {
 	local prefix_found=''
 	shift 2
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	for prefix in "${!si_prefixes[@]}"; do
 		if [[ $value =~ $prefix$ ]]; then
@@ -66,16 +86,14 @@ function cpu_is_online {
 	local -ri cpu="$1"
 	shift
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	(( cpu == 0 )) || (( $(cat cpu$cpu/online) ))
 }
 
 function cmd_core_get {
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
 		if (( cpu == 0 )) || (( $(cat cpu$cpu/online) )); then
@@ -90,12 +108,10 @@ function cmd_core_set {
 	local -ri count="$1"
 	shift
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	if (( count <= 0 )); then
-		echo >&2 "Invalid parameter: $count"
-		exit 1
+		error_invalid_parameter "$count"
 	fi
 	# Bring cores online
 	printf >&2 -- "CPU #%d -> %s\n" "0" "online"
@@ -112,10 +128,11 @@ function cmd_core_set {
 
 function cmd_core {
 	local -r cmd="${1:-get}"
-	shift
+	shift || true
 	case "$cmd" in
 	get) cmd_core_get "$@";;
 	set) cmd_core_set "$@";;
+	*) error_invalid_cmd "$cmd";;
 	esac
 }
 
@@ -123,8 +140,7 @@ function cmd_core {
 
 function cmd_governor_get {
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
 		printf >&2 -- "CPU #%d -> %s\n" "$cpu" "$(cat "cpufreq/policy$cpu/scaling_governor")"
@@ -135,12 +151,10 @@ function cmd_governor_set {
 	local -r name="$1"
 	shift
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	if ! grep -sqwF "$name" cpufreq/policy0/scaling_available_governors; then
-		echo >&2 "Invalid parameter: $name"
-		exit 1
+		error_invalid_parameter "$name"
 	fi
 	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
 		if ! cpu_is_online "$cpu"; then
@@ -158,6 +172,7 @@ function cmd_governor {
 	case "$cmd" in
 	get) cmd_governor_get "$@";;
 	set) cmd_governor_set "$@";;
+	*) error_invalid_cmd "$cmd";;
 	esac
 }
 
@@ -165,7 +180,10 @@ function cmd_governor {
 
 function cmd_boost_get {
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
+		error_too_many_args "$@"
+	fi
+	if ! [ -e cpufreq/boost ]; then
+		echo >&2 "Feature not supported on this CPU"
 		exit 1
 	fi
 	if (( $(cat cpufreq/boost) )); then
@@ -179,8 +197,7 @@ function cmd_boost_set {
 	local value="${1:-enabled}"
 	shift || true
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	if [ "$value" == enabled ]; then
 		echo 1 > cpufreq/boost
@@ -189,8 +206,7 @@ function cmd_boost_set {
 		echo 0 > cpufreq/boost
 		printf >&2 -- "BOOST <- %s\n" "disabled"
 	else
-		echo >&2 "Invalid parameter: $value"
-		exit 1
+		error_invalid_parameter "$value"
 	fi
 }
 
@@ -200,6 +216,7 @@ function cmd_boost {
 	case "$cmd" in
 	get) cmd_boost_get "$@";;
 	set) cmd_boost_set "$@";;
+	*) error_invalid_cmd "$cmd";;
 	esac
 }
 
@@ -207,8 +224,7 @@ function cmd_boost {
 
 function cmd_speed_get {
 	if (( $# )); then
-		echo >&2 "Too many arguments: $*"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
 		printf >&2 -- "CPU #%d -> %s-%s (%s)\n" "$cpu" "$(cat "cpufreq/policy$cpu/scaling_min_freq")" "$(cat "cpufreq/policy$cpu/scaling_max_freq")" "$(cat "cpufreq/policy$cpu/scaling_cur_freq")"
@@ -220,7 +236,9 @@ function cmd_speed_set {
 	local -r min_freq="$(cat "cpufreq/policy0/scaling_min_freq")"
 	if (( $# == 0 )); then
 		echo >&2 "Syntax: <min> <max>"
-		echo >&2 "Valid values: $(cat cpufreq/policy0/scaling_available_frequencies)"
+		if [ -e cpufreq/policy0/scaling_available_frequencies ]; then
+			echo >&2 "Valid values: $(cat cpufreq/policy0/scaling_available_frequencies)"
+		fi
 		exit 1
 	fi
 	local -r min="$(substitute_si_prefix $1 -3)"
@@ -228,17 +246,14 @@ function cmd_speed_set {
 	local -r max="$(substitute_si_prefix $1 -3)"
 	shift
 	if (( $# )); then
-		echo >&2 "Too many arguments"
-		exit 1
+		error_too_many_args "$@"
 	fi
 	if [ -e cpufreq/policy0/scaling_available_frequencies ]; then
 		if ! grep -sqwF "$min" cpufreq/policy0/scaling_available_frequencies; then
-			echo >&2 "Invalid parameter: $min"
-			exit 1
+			error_invalid_parameter "$min"
 		fi
 		if ! grep -sqwF "$max" cpufreq/policy0/scaling_available_frequencies; then
-			echo >&2 "Invalid parameter: $max"
-			exit 1
+			error_invalid_parameter "$max"
 		fi
 	fi
 	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
@@ -259,6 +274,7 @@ function cmd_speed {
 	case "$cmd" in
 	get) cmd_speed_get "$@";;
 	set) cmd_speed_set "$@";;
+	*) error_invalid_cmd "$cmd";;
 	esac
 }
 
@@ -302,11 +318,7 @@ function main {
 	boost) cmd_boost "$@";;
 	speed) cmd_speed "$@";;
 	help) cmd_help "$@";;
-	*)
-		echo >&2 "Invalid command: $cmd";
-		echo >&2 "";
-		cmd_help "$@";
-		exit 1;;
+	*) error_invalid_cmd "$cmd";;
 	esac
 }
 
