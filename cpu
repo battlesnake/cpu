@@ -1,0 +1,315 @@
+#!/bin/bash
+
+# 
+
+set -euo pipefail
+
+if (( UID )); then
+	exec sudo "$0" "$@"
+fi
+
+cd /sys/devices/system/cpu/
+
+declare -ri total_cpus="$(ls -1 | grep -cxP "cpu\d+")"
+
+# SI prefixes
+
+declare -rA si_prefixes=( [k]=3 [M]=6 [G]=9 [T]=12 )
+
+function get_si_prefix_shift {
+	local -r prefix="$1"
+	shift
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	if [ -z "$prefix" ]; then
+		echo 0
+	elif [ "${si_prefixes[$prefix]}" ]; then
+		echo "${si_prefixes[$prefix]}"
+	else
+		echo >&2 "Invalid/unrecognised prefix: $sufix"
+		exit 1
+	fi
+}
+
+function substitute_si_prefix {
+	local value="$1"
+	local offset="$2"
+	local prefix_found=''
+	shift 2
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	for prefix in "${!si_prefixes[@]}"; do
+		if [[ $value =~ $prefix$ ]]; then
+			let offset+=$(get_si_prefix_shift "$prefix") || true
+			value="${value%$prefix}"
+			prefix_found="$prefix"
+			break
+		fi
+	done
+	if [ "$prefix_found" ]; then
+		if (( offset < 0 )); then
+			echo >&1 "Fractional values are not supported"
+			exit 1
+		fi
+		while (( offset-- > 0 )); do
+			value="${value}0"
+		done
+	fi
+	echo "$value"
+}
+
+# Core enable count
+
+function cpu_is_online {
+	local -ri cpu="$1"
+	shift
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	(( cpu == 0 )) || (( $(cat cpu$cpu/online) ))
+}
+
+function cmd_core_get {
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
+		if (( cpu == 0 )) || (( $(cat cpu$cpu/online) )); then
+			printf >&2 -- "CPU #%d -> %s\n" "$cpu" "online"
+		else
+			printf >&2 -- "CPU #%d -> %s\n" "$cpu" "offline"
+		fi
+	done
+}
+
+function cmd_core_set {
+	local -ri count="$1"
+	shift
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	if (( count <= 0 )); then
+		echo >&2 "Invalid parameter: $count"
+		exit 1
+	fi
+	# Bring cores online
+	printf >&2 -- "CPU #%d -> %s\n" "0" "online"
+	for cpu in $(seq 1 "$(( count - 1 ))"); do
+		echo 1 > "cpu$cpu/online"
+		printf >&2 -- "CPU #%d <- %s\n" "$cpu" "online"
+	done
+	# Take cores offline
+	for cpu in $(seq "$count" "$(( total_cpus  - 1 ))"); do
+		echo 0 > "cpu$cpu/online"
+		printf >&2 -- "CPU #%d <- %s\n" "$cpu" "offline"
+	done
+}
+
+function cmd_core {
+	local -r cmd="${1:-get}"
+	shift
+	case "$cmd" in
+	get) cmd_core_get "$@";;
+	set) cmd_core_set "$@";;
+	esac
+}
+
+# CPU governor
+
+function cmd_governor_get {
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
+		printf >&2 -- "CPU #%d -> %s\n" "$cpu" "$(cat "cpufreq/policy$cpu/scaling_governor")"
+	done
+}
+
+function cmd_governor_set {
+	local -r name="$1"
+	shift
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	if ! grep -sqwF "$name" cpufreq/policy0/scaling_available_governors; then
+		echo >&2 "Invalid parameter: $name"
+		exit 1
+	fi
+	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
+		if ! cpu_is_online "$cpu"; then
+			printf >&2 -- "CPU #%d is offline so was not configured\n" "$cpu"
+		else
+			echo "$name" > "cpufreq/policy$cpu/scaling_governor"
+			printf >&2 -- "CPU #%d <- %s\n" "$cpu" "$(cat "cpufreq/policy$cpu/scaling_governor")"
+		fi
+	done
+}
+
+function cmd_governor {
+	local -r cmd="${1:-get}"
+	shift || true
+	case "$cmd" in
+	get) cmd_governor_get "$@";;
+	set) cmd_governor_set "$@";;
+	esac
+}
+
+# CPU boost
+
+function cmd_boost_get {
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	if (( $(cat cpufreq/boost) )); then
+		printf >&2 -- "BOOST -> %s\n" "enabled"
+	else
+		printf >&2 -- "BOOST -> %s\n" "disabled"
+	fi
+}
+
+function cmd_boost_set {
+	local value="${1:-enabled}"
+	shift || true
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	if [ "$value" == enabled ]; then
+		echo 1 > cpufreq/boost
+		printf >&2 -- "BOOST <- %s\n" "enabled"
+	elif [ "$value" == disabled ]; then
+		echo 0 > cpufreq/boost
+		printf >&2 -- "BOOST <- %s\n" "disabled"
+	else
+		echo >&2 "Invalid parameter: $value"
+		exit 1
+	fi
+}
+
+function cmd_boost {
+	local -r cmd="${1:-get}"
+	shift || true
+	case "$cmd" in
+	get) cmd_boost_get "$@";;
+	set) cmd_boost_set "$@";;
+	esac
+}
+
+# CPU speed
+
+function cmd_speed_get {
+	if (( $# )); then
+		echo >&2 "Too many arguments: $*"
+		exit 1
+	fi
+	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
+		printf >&2 -- "CPU #%d -> %s-%s (%s)\n" "$cpu" "$(cat "cpufreq/policy$cpu/scaling_min_freq")" "$(cat "cpufreq/policy$cpu/scaling_max_freq")" "$(cat "cpufreq/policy$cpu/scaling_cur_freq")"
+	done
+}
+
+function cmd_speed_set {
+	local -r max_freq="$(cat "cpufreq/policy0/scaling_max_freq")"
+	local -r min_freq="$(cat "cpufreq/policy0/scaling_min_freq")"
+	if (( $# == 0 )); then
+		echo >&2 "Syntax: <min> <max>"
+		echo >&2 "Valid values: $(cat cpufreq/policy0/scaling_available_frequencies)"
+		exit 1
+	fi
+	local -r min="$(substitute_si_prefix $1 -3)"
+	shift
+	local -r max="$(substitute_si_prefix $1 -3)"
+	shift
+	if (( $# )); then
+		echo >&2 "Too many arguments"
+		exit 1
+	fi
+	if ! grep -sqwF "$min" cpufreq/policy0/scaling_available_frequencies; then
+		echo >&2 "Invalid parameter: $min"
+		exit 1
+	fi
+	if ! grep -sqwF "$max" cpufreq/policy0/scaling_available_frequencies; then
+		echo >&2 "Invalid parameter: $max"
+		exit 1
+	fi
+	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
+		if ! cpu_is_online "$cpu"; then
+			printf >&2 -- "CPU #%d is offline so was not configured\n" "$cpu"
+		else
+			echo "$min" > "cpufreq/policy$cpu/scaling_min_freq"
+			echo "$max" > "cpufreq/policy$cpu/scaling_max_freq"
+			echo "$min" > "cpufreq/policy$cpu/scaling_min_freq"
+			printf >&2 -- "CPU #%d <- %d-%d\n" "$cpu" "$min" "$max"
+		fi
+	done
+}
+
+function cmd_speed {
+	local -r cmd="${1:-get}"
+	shift || true
+	case "$cmd" in
+	get) cmd_speed_get "$@";;
+	set) cmd_speed_set "$@";;
+	esac
+}
+
+# Help
+
+function cmd_help {
+	echo >&2 "$0 <command> <subcommand> [args...]"
+	echo >&2 ""
+	echo >&2 "command: core / governor / boost / speed / help"
+	echo >&2 ""
+	echo >&2 "subcommand: (typically) get / set"
+	echo >&2 "  "
+	echo >&2 "Enabled core count:"
+	echo >&2 "  $0 core get"
+	echo >&2 "  $0 core set <count>"
+	echo >&2 "  "
+	echo >&2 "Governor:"
+	echo >&2 "  $0 governor get"
+	echo >&2 "  $0 governor set"
+	echo >&2 "  $0 governor set <name>"
+	echo >&2 "  "
+	echo >&2 "Boost (AMD):"
+	echo >&2 "  $0 boost get"
+	echo >&2 "  $0 boost set (enabled|disabled)"
+	echo >&2 "  "
+	echo >&2 "Speed:"
+	echo >&2 "  $0 speed get"
+	echo >&2 "  $0 speed set <min> <max> - may use certain SI suffixes e.g. 2700M, 3G, etc"
+	echo >&2 "  "
+	echo >&2 "  "
+}
+
+# Main function
+
+function main {
+	local -r cmd="${1:-help}"
+	shift || true
+	case "$cmd" in
+	core) cmd_core "$@";;
+	governor) cmd_governor "$@";;
+	boost) cmd_boost "$@";;
+	speed) cmd_speed "$@";;
+	help) cmd_help "$@";;
+	*)
+		echo >&2 "Invalid command: $cmd";
+		echo >&2 "";
+		cmd_help "$@";
+		exit 1;;
+	esac
+}
+
+main "$@"
+
+exit 0
