@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# 
-
 set -euo pipefail
 
 if (( UID )); then
@@ -233,13 +231,15 @@ function cmd_speed_set {
 		echo >&2 "Too many arguments"
 		exit 1
 	fi
-	if ! grep -sqwF "$min" cpufreq/policy0/scaling_available_frequencies; then
-		echo >&2 "Invalid parameter: $min"
-		exit 1
-	fi
-	if ! grep -sqwF "$max" cpufreq/policy0/scaling_available_frequencies; then
-		echo >&2 "Invalid parameter: $max"
-		exit 1
+	if [ -e cpufreq/policy0/scaling_available_frequencies ]; then
+		if ! grep -sqwF "$min" cpufreq/policy0/scaling_available_frequencies; then
+			echo >&2 "Invalid parameter: $min"
+			exit 1
+		fi
+		if ! grep -sqwF "$max" cpufreq/policy0/scaling_available_frequencies; then
+			echo >&2 "Invalid parameter: $max"
+			exit 1
+		fi
 	fi
 	for cpu in $(seq 0 $(( total_cpus  - 1 )) ); do
 		if ! cpu_is_online "$cpu"; then
